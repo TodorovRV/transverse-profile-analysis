@@ -31,7 +31,7 @@ def find_extrema(slice_arr, std):
             maxs.append((x1, slice_spl_pol(x1)))
             flag_max = True
         if flag_min == True and flag_max == True:
-            if np.abs(maxs[-1][1] - mins[-1][1]) < max(20 * std, max_value / 10):
+            if np.abs(maxs[-1][1] - mins[-1][1]) < max(20 * std, max_value / 15):
                 maxs.pop()
                 mins.pop()
                 flag_min = False
@@ -39,7 +39,8 @@ def find_extrema(slice_arr, std):
     return mins, maxs
 
 
-def generate_slices(image_data, ridge, spl, mapsize, pix_size, blc, trc, std, std_p):
+def generate_slices(image_data, ridge, spl, mapsize, pix_size, blc, trc, std, std_p,
+                    significant_values_i=None, significant_values_p=None):
     # maxlen_coord = ridge[0].flat[abs(ridge[1]).argmax()]
     maxlen_coord = np.max(ridge[0])
     minlen_coord = np.min(ridge[ridge > 0])
@@ -63,16 +64,18 @@ def generate_slices(image_data, ridge, spl, mapsize, pix_size, blc, trc, std, st
         dr = maxlen_coord / 10000
         dy = ((r + dr) * np.cos(spl(r + dr)) - (r - dr) * np.cos(spl(r - dr)))
         dx = ((r + dr) * np.sin(spl(r + dr)) - (r - dr) * np.sin(spl(r - dr)))
-        rigde_direction = np.arctan(dx / dy)
+        rigde_direction = np.arctan2(dx, dy)
         slope = np.tan(rigde_direction + np.pi / 2)
         if np.abs(slope) < 1:
             delta = (blc[0] - trc[0]) * pix_to_mas_x / 2
             slice_x = np.linspace(r * np.cos(spl(r)) - delta, r * np.cos(spl(r)) + delta, linspace_size)
             slice_y = slope * (slice_x - r * np.cos(spl(r))) + r * np.sin(spl(r))
+            ridge_coords = (r * np.cos(spl(r)), r * np.sin(spl(r)))
         else:
             delta = (blc[1] - trc[1]) * pix_to_mas_y / 2
             slice_y = np.linspace(r * np.sin(spl(r)) - delta, r * np.sin(spl(r)) + delta, linspace_size)
             slice_x = (slice_y - r * np.sin(spl(r))) / slope + r * np.cos(spl(r))
+            ridge_coords = (r * np.sin(spl(r)), r * np.cos(spl(r)))
 
         slice_x_pix = np.array([round(-x / pix_to_mas_x + mapsize[0] / 2) for x in slice_x])
         slice_y_pix = np.array([round(y / pix_to_mas_y + mapsize[1] / 2) for y in slice_y])
@@ -96,14 +99,35 @@ def generate_slices(image_data, ridge, spl, mapsize, pix_size, blc, trc, std, st
 
         slice_values_i = np.array([image_data['i'][slice_y_pix[i]][slice_x_pix[i]]
                                      for i in np.arange(slice_y_pix.size)])
+        
         slice_values_p = np.array([image_data['p'][slice_y_pix[i]][slice_x_pix[i]]
                                      for i in np.arange(slice_y_pix.size)])
+        
         slice_values_chi = np.array([image_data['chi'][slice_y_pix[i]][slice_x_pix[i]]
                                      for i in np.arange(slice_y_pix.size)])
-        slice_values_chi = slice_values_chi + rigde_direction + np.pi/2
-        slice_values_chi[slice_values_chi > np.pi/2] -= np.pi
+        
+        if rigde_direction > np.pi/2:
+            rigde_direction -= np.pi
+        elif rigde_direction < -np.pi/2:
+            rigde_direction += np.pi
+
+        slice_values_chi = slice_values_chi + np.pi/2 + rigde_direction
+        slice_values_chi[slice_values_chi > np.pi/2] -=np.pi
+        slice_values_chi[slice_values_chi < -np.pi/2] +=np.pi
+        slice_values_chi = abs(slice_values_chi)
+        '''if abs(slice_values_chi.mean() + np.pi) > abs(slice_values_chi.mean() - np.pi):
+            slice_values_chi -= np.pi/2
+        else:
+            slice_values_chi += np.pi/2
+
+        if slice_values_chi.max() < 0:
+            slice_values_chi += np.pi'''
+
+        slice_values_chi[2:-2] = np.convolve(slice_values_chi, np.array([1 / 5, 1 / 5, 1 / 5, 1 / 5, 1 / 5]), 'valid')
+
         slice_values_fpol = np.array([image_data['fpol'][slice_y_pix[i]][slice_x_pix[i]]
                                      for i in np.arange(slice_y_pix.size)])
+        
         if image_data['std_EVPA'] is not None:
             slice_values_std_EVPA = np.array([image_data['std_EVPA'][slice_y_pix[i]][slice_x_pix[i]]
                                               for i in np.arange(slice_y_pix.size)])
@@ -112,14 +136,35 @@ def generate_slices(image_data, ridge, spl, mapsize, pix_size, blc, trc, std, st
 
         slice_arr = np.array([slice_x, slice_y, slice_values_p, slice_values_chi, 
                               slice_values_std_EVPA, slice_values_fpol])
-        slice_arr = slice_arr[:, slice_values_i > 20 * std]
-        slice_arr = slice_arr[:, slice_arr[2] > 20 * std_p]
+        # default is 20
+        if significant_values_i is None:
+            significant_values_i = 20 * std
+        slice_arr = slice_arr[:, slice_values_i > significant_values_i]
+        if significant_values_p is None:
+            significant_values_p = 30 * std
+        slice_arr = slice_arr[:, slice_arr[2] > significant_values_p]
+        
         # delete isolated points
         slice_arr_mask = np.full(slice_arr[0].size, True)
         for i in np.arange(slice_arr[2].size - 1):
             if np.hypot(slice_arr[0][i] - slice_arr[0][i + 1],
                         slice_arr[1][i] - slice_arr[1][i + 1]) > 4 * np.hypot(pix_to_mas_x, pix_to_mas_y):
-                slice_arr_mask[i] = False
+                if np.hypot(slice_arr[0][i]-ridge_coords[0], slice_arr[1][i]-ridge_coords[1]) < \
+                      np.hypot(slice_arr[0][i+1]-ridge_coords[0], slice_arr[1][i+1]-ridge_coords[1]):
+                    j = i+1
+                    while j < slice_arr[2].size:
+                        slice_arr_mask[j] = 0
+                        j+=1
+                else:
+                    j = i
+                    while j >= 0:
+                        slice_arr_mask[j] = 0
+                        j-=1
+        #slice_arr_mask = np.full(slice_arr[0].size, True)
+        #for i in np.arange(slice_arr[2].size - 1):
+        #    if np.hypot(slice_arr[0][i] - slice_arr[0][i + 1],
+        #                slice_arr[1][i] - slice_arr[1][i + 1]) > 4 * np.hypot(pix_to_mas_x, pix_to_mas_y):
+        #        slice_arr_mask[i] = False
         slice_arr = slice_arr[:, slice_arr_mask]
         slice_arrs.append(slice_arr)
     return slice_arrs, ridge_space
@@ -150,9 +195,15 @@ def resolve_fountain_chi_profile(slice_arr, slice_arr_p, std_p):
         return False
     else:
         return True
-        
+    
 
-def resolve_nonfountain_chi_profile(slice_arr):
+def resolve_nonfountain_chi_profile(slice_arr, slice_arr_p, std_p):
+    mins_p, maxs_p = find_extrema(slice_arr_p, std_p)
+    if len(maxs_p) == 2 and ((abs(slice_arr[maxs_p[0][0]] - np.pi/2) < np.pi/6 and \
+                            abs(slice_arr[maxs_p[1][0]]) < np.pi/6) or \
+                            (abs(slice_arr[maxs_p[1][0]] - np.pi/2) < np.pi/6 and \
+                            abs(slice_arr[maxs_p[0][0]]) < np.pi/6)):
+        return 'bimodal   '
     if abs(np.mean(abs(slice_arr))) < abs(np.pi/2 - np.mean(abs(slice_arr))):
         return 'parallel  '
     else:
@@ -160,21 +211,43 @@ def resolve_nonfountain_chi_profile(slice_arr):
 
 
 def find_chi_profie(slice_arr, slice_arr_p, std_p):
-    if resolve_fountain_chi_profile(slice_arr, slice_arr_p, std_p):
-        return 'foutain   '
+    
+    mins_p, maxs_p = find_extrema(slice_arr_p, std_p)
+    if len(maxs_p) == 2 and ((abs(slice_arr[maxs_p[0][0]] - np.pi/2) < np.pi/6 and \
+                            abs(slice_arr[maxs_p[1][0]]) < np.pi/6) or \
+                            (abs(slice_arr[maxs_p[1][0]] - np.pi/2) < np.pi/6 and \
+                            abs(slice_arr[maxs_p[0][0]]) < np.pi/6)):
+        return 'bimodal   '
+    elif slice_arr.mean() > abs(np.pi/2 - slice_arr.mean()):
+        
+        if len(maxs_p) >= 2:
+            mins, maxs = find_extrema(slice_arr[maxs_p[0][0]:maxs_p[-1][0]], 0)
+            if len(mins) > len(maxs):
+                return 'fountain  '
+            else:
+                return 'orthogonal'
+        else:
+            mins, maxs = find_extrema(slice_arr[slice_arr_p > slice_arr_p.max()/5], 0)
+            if len(mins) > len(maxs):
+                return 'fountain  '
+            else:
+                return 'orthogonal'
     else:
-        return resolve_nonfountain_chi_profile(slice_arr)
-    # if slice_arr.max() - slice_arr.min() > np.pi/3:
-    #     return     'foutain   '
-    # else:
-    #     if abs(np.mean(abs(slice_arr))) < abs(np.pi/2 - np.mean(abs(slice_arr))):
-    #         return 'parallel  '
-    #     else:
-    #         return 'orthogonal'
-
+        return 'parallel  '
+        
 
 def find_fpol_profie(slice_arr):
     mins, maxs = find_extrema(slice_arr, 0)
+    '''
+    if slice_arr[0]+slice_arr[1] > 4*slice_arr.mean() and \
+            slice_arr[-1]+slice_arr[-2] > 4*slice_arr.mean():
+        if len(maxs) > 0:
+            return 'W-like'
+        else:
+            return 'U-like'
+    else:
+        return 'flat  '
+    '''
     if len(mins) == 2:
         return 'W-like'
     elif len(mins) == 1:
@@ -184,27 +257,37 @@ def find_fpol_profie(slice_arr):
 
 
 def find_std_profie(slice_arr, std, slice_arr_p, std_p):
-    mins, maxs = find_extrema(slice_arr, std)
-    mins_p, maxs_p = find_extrema(slice_arr_p, std_p)
-    if len(maxs_p) >= 2 and len(mins_p) >= 1 and \
-       len(maxs) == 1 and len(mins) == 0 and \
-       not maxs[0][0] > maxs_p[-1][0] and \
-       not maxs[0][0] < maxs_p[0][0]:
-        return 'Yes'
-    else:
+    try:
+        if slice_arr.max() > 20:
+            return 'Yes'
+        else:
+            return 'No'
+    except:
         return 'No'
 
+    # mins, maxs = find_extrema(slice_arr, std)
+    # mins_p, maxs_p = find_extrema(slice_arr_p, std_p)
+    # if len(maxs_p) >= 2 and len(mins_p) >= 1 and \
+    #    len(maxs) == 1 and len(mins) == 0 and \
+    #    not maxs[0][0] > maxs_p[-1][0] and \
+    #    not maxs[0][0] < maxs_p[0][0]:
+    #     return 'Yes'
+    # else:
+    #     return 'No'
 
-def return_profiles(slice_arr, std_p, std_std, pix_to_mas_x):
+
+def return_profiles(slice_arr, stack_data_folder, std_data_folder, base_dir, std_p, std_std, pix_to_mas_x, std_profile=None):
     p_profile = find_p_profie(slice_arr[2], std_p)
     fpol_profile = find_fpol_profie(slice_arr[5])
-    std_profile = find_std_profie(slice_arr[4], std_std, slice_arr[2], std_p)
+    if std_profile is None:
+        std_profile = find_std_profie(slice_arr[4], std_std, slice_arr[2], std_p)
     chi_profile = find_chi_profie(slice_arr[3], slice_arr[2], std_p)
 
     fig, ax = plt.subplots(figsize=(8.5, 6))
     ax.plot(slice_arr[0], slice_arr[1], color='g')
-    plot_sourse_map_w_ridge(source_name, data_folder, base_dir=base_dir, outfile="{}.jpg".format(source_name),  
-                            contours_mode='I', colors_mode='fpol', vectors_mode='chi', fig=fig, ax=ax)
+    plot_sourse_map_w_ridge(source_name, stack_data_folder, std_data_folder=std_data_folder, base_dir=base_dir, 
+                            outfile="{}.jpg".format(source_name), outdir='./sourse_graphs', contours_mode='P', colors_mode='std', 
+                            vectors_mode='chi', fig=fig, ax=ax)
     plt.close()
 
     fig, ax1 = plt.subplots(figsize=(8.5, 6))
@@ -230,6 +313,7 @@ def return_profiles(slice_arr, std_p, std_std, pix_to_mas_x):
     return fpol_profile, chi_profile, p_profile, std_profile
 
 
+# Not actual
 def detect_save_2pike_stdmax_profile(source_name, data_folder, base_dir):
     i_file = '{}/{}_stack_i_true.fits'.format(data_folder, source_name)
     p_file = '{}/{}_stack_p_true.fits'.format(data_folder, source_name)
@@ -374,7 +458,7 @@ def detect_save_2pike_stdmax_profile(source_name, data_folder, base_dir):
                     color = 'tab:blue'
                     ax2.set_ylabel('(Degrees)', color=color, fontsize=20)  # we already handled the x-label with ax1
                     ax2.plot(np.arange(slice_arr[3].size)*pix_to_mas_x, slice_arr[3] / degree_to_rad,
-                             color=color, linestyle='dotted', label='EVPA')
+                             color=color, linestyle='dotted', label='|EVPA-rig|')
                     ax2.plot(np.arange(slice_arr[4].size)*pix_to_mas_x, slice_arr[4], color=color,
                              linestyle='dashdot', label='STD EVPA')
                     ax2.tick_params(axis='y', labelcolor=color)
@@ -388,16 +472,16 @@ def detect_save_2pike_stdmax_profile(source_name, data_folder, base_dir):
     return None
 
 
-def analize_profile(source_name, data_folder, base_dir):
+def analize_profile(source_name, stack_data_folder, std_data_folder, base_dir):
     # determine transverse polarisation profile as in Puskarev et al. 2023
-    i_file = '{}/{}_stack_i_true.fits'.format(data_folder, source_name)
-    p_file = '{}/{}_stack_p_true.fits'.format(data_folder, source_name)
-    chi_file = '{}/{}_stack_p_ang.fits'.format(data_folder, source_name)
+    i_file = '{}/{}_stack_i_true.fits'.format(stack_data_folder, source_name)
+    p_file = '{}/{}_stack_p_true.fits'.format(stack_data_folder, source_name)
+    chi_file = '{}/{}_stack_p_ang.fits'.format(stack_data_folder, source_name)
     image_data_i = fits.getdata(i_file, ext=0)[0][0]
     image_data_p = fits.getdata(p_file, ext=0)[0][0]
     image_data_chi = fits.getdata(chi_file, ext=0)[0][0] * degree_to_rad
     try:
-        std_EVPA_file = '{}/std_evpa_fits/{}_std_EVPA_deg_unbiased_var_2.fits'.format(data_folder, source_name)
+        std_EVPA_file = '{}/{}_std_EVPA_deg_unbiased_var_2.fits'.format(std_data_folder, source_name)
         image_data_std_EVPA = fits.getdata(std_EVPA_file, ext=0)
     except:
         print("STD EVPA is not defined!")
@@ -486,56 +570,69 @@ def analize_profile(source_name, data_folder, base_dir):
 
     slice_arrs, ridge_space = generate_slices(image_data, ridge, spl, mapsize, pix_size, blc, trc, std, std_p)
 
+    slice_arr_M = None
+    std_profile = 'No'
     for slice_arr in slice_arrs:
         if slice_arr[2].size > 5:
             # smoothing slice_arr
             conv_core = np.array([1 / 10, 1 / 5, 2 / 5, 1 / 5, 1 / 10])
             slice_arr[2] = np.convolve(slice_arr[2], conv_core, 'same')
-            slice_arr[3] = np.convolve(slice_arr[3], conv_core, 'same')
+            # slice_arr[3] = np.convolve(slice_arr[3], conv_core, 'same')
             if image_data_std_EVPA is not None:
                 slice_arr[4] = np.convolve(slice_arr[4], conv_core, 'same')
-            slice_arr[5] = np.convolve(slice_arr[5], conv_core, 'same')
+            slice_arr[5][2:-2] = np.convolve(slice_arr[5], conv_core, 'valid')
             
             if find_p_profie(slice_arr[2], std_p) == 'M-like':
-                    print(resolve_fountain_chi_profile(slice_arr[3], slice_arr[2], std_p))
-                    return return_profiles(slice_arr, std_p, std_std, pix_to_mas_x)
-            
+                if slice_arr_M is None:
+                    slice_arr_M = slice_arr
+                if find_std_profie(slice_arr[4], std, slice_arr[2], std_p) == 'Yes':
+                    std_profile = 'Yes'
+                if find_chi_profie(slice_arr[3], slice_arr[2], std_p) == 'fountain  ':
+                    return return_profiles(slice_arr, stack_data_folder, std_data_folder, base_dir, std_p, std_std, 
+                                           pix_to_mas_x, std_profile=std_profile)
+                
+    if slice_arr_M is not None:
+        return return_profiles(slice_arr_M, stack_data_folder, std_data_folder, base_dir, std_p, std_std, 
+                               pix_to_mas_x, std_profile=std_profile)
+
     slice_arr = slice_arrs[int(len(slice_arrs)/3)]
     if slice_arr[2].size > 5:
-        return return_profiles(slice_arr, std_p, std_std, pix_to_mas_x)
+        return return_profiles(slice_arr, stack_data_folder, std_data_folder, base_dir, std_p, std_std, pix_to_mas_x)
     else:
         fr = 4
         while slice_arr[2].size <= 5 and fr < 20:
             slice_arr = slice_arrs[int(len(slice_arrs)/fr)]
             fr += 1
         if fr == 20:
-            return 'No data', 'No data', 'No data', 'No data'
+            return 'No_data', 'No_data', 'No_data', 'No_data'
         else:
-            return return_profiles(slice_arr, std_p, std_std, pix_to_mas_x)
+            return return_profiles(slice_arr, stack_data_folder, std_data_folder, base_dir, std_p, std_std, pix_to_mas_x)
 
 
 if __name__ == "__main__":
-    data_folder = '/home/rtodorov/data_stack_fits'
+    stack_data_folder = '/home/rtodorov/vlbi_data/data_stack_fits'
+    std_data_folder = '/home/rtodorov/vlbi_data/std_evpa_fits'
     base_dir = '/home/rtodorov/transverse-profile-analysis'
 
-    with open(os.path.join(data_folder, "source_list.txt")) as f:
+    with open(os.path.join(stack_data_folder, "source_list.txt")) as f:
         lines = f.readlines()
 
     f = open('./profiles-table.txt', 'w')
-    f.write('Here is tranverse polarisation profiles table\n')
-    f.write('sourse, m-profile, EVPA-profile, p-profile, if std EVPA distribution confirms precession model\n')
+    f.write('sourse m-profile EVPA-profile p-profile std_EVPA_profile\n')
     for line in lines:
         source_name = line[0:8]
         print()
         print('########################################')
         print('########## Analyzing {} ##########'.format(source_name))
         print('########################################')
-        fpol_profile, chi_profile, p_profile, std_profile = analize_profile(source_name, data_folder, base_dir)
+        fpol_profile, chi_profile, p_profile, std_profile = analize_profile(source_name, stack_data_folder, std_data_folder, base_dir)
+        if p_profile == 'M-like' and fpol_profile == 'flat  ':
+            fpol_profile = 'U-like'
         if p_profile == 'M-like':
             f.write('{}   {}   {}   {}   {}\n'.format(source_name, fpol_profile, chi_profile, p_profile, std_profile))
         else:
             f.write('{}   {}   {}   {}   {}\n'.format(source_name, fpol_profile, chi_profile, p_profile, '-'))
-
+    f.close()
     '''
     with open('./source_list.txt') as f:
         lines = f.readlines()
